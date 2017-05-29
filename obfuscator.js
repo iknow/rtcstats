@@ -2,93 +2,111 @@
 
 var SDPUtils = require('sdp');
 
-// obfuscate ip, keeping address family intact.
-function obfuscateIP(ip) {
-    if (ip.indexOf('[') === 0 || ip.indexOf(':') !== -1) { // IPv6
-        return '::1';
-    }
-    var parts = ip.split('.');
-    if (parts.length === 4) {
-        parts[3] = 'x';
-        return parts.join('.');
-    } else {
-        return ip;
-    }
+function Obfuscator() {
 }
+
+// obfuscate ip, keeping address family intact.
+Obfuscator.prototype.obfuscateIP = function (ip) {
+  if (ip.indexOf('[') === 0 || ip.indexOf(':') !== -1) { // IPv6
+    return '::1';
+  }
+  var parts = ip.split('.');
+  if (parts.length === 4) {
+    parts[3] = 'x';
+    return parts.join('.');
+  } else {
+    return ip;
+  }
+};
 
 // obfuscate the ip in ice candidates. Does NOT obfuscate the ip of the TURN server to allow
 // selecting/grouping sessions by TURN server.
-function obfuscateCandidate(candidate) {
-    var cand = SDPUtils.parseCandidate(candidate);
-    if (cand.type !== 'relay') {
-        cand.ip = obfuscateIP(cand.ip);
-    }
-    if (cand.relatedAddress) {
-        cand.relatedAddress = obfuscateIP(cand.relatedAddress);
-    }
-    return SDPUtils.writeCandidate(cand);
-}
+Obfuscator.prototype.obfuscateCandidate = function (candidate) {
+  var cand = SDPUtils.parseCandidate(candidate);
+  if (cand.type !== 'relay') {
+    cand.ip = this.obfuscateIP(cand.ip);
+  }
+  if (cand.relatedAddress) {
+    cand.relatedAddress = this.obfuscateIP(cand.relatedAddress);
+  }
+  return SDPUtils.writeCandidate(cand);
+};
 
-function obfuscateSDP(sdp) {
-    var lines = SDPUtils.splitLines(sdp);
-    return lines.map(function(line) {
-        // obfuscate a=candidate, c= and a=rtcp
-        if (line.indexOf('a=candidate:') === 0) {
-            return obfuscateCandidate(line);
-        } else if (line.indexOf('c=') === 0) {
-            return 'c=IN IP4 0.0.0.0';
-        } else if (line.indexOf('a=rtcp:') === 0) {
-            return 'a=rtcp:9 IN IP4 0.0.0.0';
+Obfuscator.prototype.obfuscateSDP = function (sdp) {
+  var self = this;
+  var lines = SDPUtils.splitLines(sdp);
+  return lines.map(function (line) {
+    // obfuscate a=candidate, c= and a=rtcp
+    if (line.indexOf('a=candidate:') === 0) {
+      return self.obfuscateCandidate(line);
+    } else if (line.indexOf('c=') === 0) {
+      return 'c=IN IP4 0.0.0.0';
+    } else if (line.indexOf('a=rtcp:') === 0) {
+      return 'a=rtcp:9 IN IP4 0.0.0.0';
+    } else {
+      return line;
+    }
+  }).join('\r\n').trim() + '\r\n';
+};
+
+Obfuscator.prototype.obfuscateStats = function (stats) {
+  var self = this;
+  Object.keys(stats).forEach(function (id) {
+    var report = stats[id];
+    if (report.ipAddress && report.candidateType !== 'relayed') {
+      report.ipAddress = self.obfuscateIP(report.ipAddress);
+    }
+    ['googLocalAddress', 'googRemoteAddress'].forEach(function (name) {
+      // contains both address and port
+      var address = report[name];
+      if (address) {
+        var portSeperator = address.lastIndexOf(':');
+        var ip = address.substr(0, portSeperator);
+        var port = address.substr(portSeperator + 1);
+        if (ip.startsWith('[') && ip.endsWith(']')) {
+          var innerIP = ip.substr(1, ip.length - 2);
+          ip = '[' + self.obfuscateIP(innerIP) + ']';
         } else {
-            return line;
+          ip = self.obfuscateIP(ip);
         }
-    }).join('\r\n').trim() + '\r\n';
-}
-
-function obfuscateStats(stats) {
-    Object.keys(stats).forEach(function(id) {
-        var report = stats[id];
-        if (report.ipAddress && report.candidateType !== 'relayed') {
-            report.ipAddress = obfuscateIP(report.ipAddress);
-        }
-        ['googLocalAddress', 'googRemoteAddress'].forEach(function(name) {
-            // contains both address and port
-            var port;
-            if (report[name]) {
-                if (report[name][0] === '[') {
-                    port = report[name].substr(report[name].indexOf(']') + 2);
-                } else {
-                    port = report[name].substr(report[name].indexOf(':') + 1);
-                }
-                report[name] = obfuscateIP(report[name]) + ':' + port;
-            }
-        });
+        report[name] = ip + ':' + port;
+      }
     });
-}
+  });
+};
 
-module.exports = function(data) {
-    switch(data[0]) {
+Obfuscator.prototype.obfuscate = function (eventName, details) {
+  switch (eventName) {
     case 'addIceCandidate':
     case 'onicecandidate':
-        if (data[2] && data[2].candidate) {
-            data[2].candidate = obfuscateCandidate(data[2].candidate);
-        }
-        break;
+      if (details && details.candidate) {
+        details.candidate = this.obfuscateCandidate(details.candidate);
+      }
+      break;
     case 'setLocalDescription':
     case 'setRemoteDescription':
     case 'createOfferOnSuccess':
     case 'createAnswerOnSuccess':
-        if (data[2] && data[2].sdp) {
-            data[2].sdp = obfuscateSDP(data[2].sdp);
-        }
-        break;
+      if (details && details.sdp) {
+        details.sdp = this.obfuscateSDP(details.sdp);
+      }
+      break;
     case 'getStats':
     case 'getstats':
-        if (data[2]) {
-            obfuscateStats(data[2]);
-        }
-        break;
+      if (details) {
+        this.obfuscateStats(details);
+      }
+      break;
     default:
-        break;
-    }
+      break;
+  }
+  return details;
 };
+
+var defaultObfuscator = new Obfuscator();
+
+module.exports = function (data) {
+  return defaultObfuscator.obfuscate(data[0], data[2]);
+};
+
+module.exports.Obfuscator = Obfuscator;
