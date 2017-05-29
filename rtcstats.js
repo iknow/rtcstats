@@ -111,7 +111,12 @@ function removeTimestamps(results) {
 }
 */
 
-function instrumentPeerConnection(pc, id, config, constraints, trace, getStatsInterval) {
+function instrumentPeerConnection(pc, options) {
+  var config = options.config || { nullConfig: true };
+  var constraints = options.constraints;
+  var trace = options.trace;
+  var getStatsInterval = options.getStatsInterval;
+
   if (!config) {
     config = { nullConfig: true };
   }
@@ -130,18 +135,18 @@ function instrumentPeerConnection(pc, id, config, constraints, trace, getStatsIn
     config.browserType = 'webkit';
   }
 
-  trace('create', id, config);
+  trace('create', config);
   // TODO: do we want to log constraints here? They are chrome-proprietary.
   // http://stackoverflow.com/questions/31003928/what-do-each-of-these-experimental-goog-rtcpeerconnectionconstraints-do
   if (constraints) {
-    trace('constraints', id, constraints);
+    trace('constraints', constraints);
   }
 
   ['createDataChannel', 'close'].forEach(function(method) {
     if (pc[method]) {
       var nativeMethod = pc[method];
       pc[method] = function() {
-        trace(method, id, arguments);
+        trace(method, arguments);
         return nativeMethod.apply(pc, arguments);
       };
     }
@@ -155,7 +160,7 @@ function instrumentPeerConnection(pc, id, config, constraints, trace, getStatsIn
           return t.kind + ':' + t.id;
         });
 
-        trace(method, id, stream.id + ' ' + streamInfo);
+        trace(method, stream.id + ' ' + streamInfo);
         return nativeMethod.call(pc, stream);
       };
     }
@@ -172,18 +177,18 @@ function instrumentPeerConnection(pc, id, config, constraints, trace, getStatsIn
         } else if (arguments.length === 3 && typeof arguments[2] === 'object') {
           opts = arguments[2];
         }
-        trace(method, id, opts);
+        trace(method, opts);
         return new Promise(function(resolve, reject) {
           nativeMethod.apply(pc, [
             function(description) {
-              trace(method + 'OnSuccess', id, description);
+              trace(method + 'OnSuccess', description);
               resolve(description);
               if (args.length > 0 && typeof args[0] === 'function') {
                 args[0].apply(null, [description]);
               }
             },
             function(err) {
-              trace(method + 'OnFailure', id, err.toString());
+              trace(method + 'OnFailure', err.toString());
               reject(err);
               if (args.length > 1 && typeof args[1] === 'function') {
                 args[1].apply(null, [err]);
@@ -201,18 +206,18 @@ function instrumentPeerConnection(pc, id, config, constraints, trace, getStatsIn
       var nativeMethod = pc[method];
       pc[method] = function() {
         var args = arguments;
-        trace(method, id, args[0]);
+        trace(method, args[0]);
         return new Promise(function(resolve, reject) {
           nativeMethod.apply(pc, [args[0],
             function() {
-              trace(method + 'OnSuccess', id);
+              trace(method + 'OnSuccess');
               resolve();
               if (args.length >= 2) {
                 args[1].apply(null, []);
               }
             },
             function(err) {
-              trace(method + 'OnFailure', id, err.toString());
+              trace(method + 'OnFailure', err.toString());
               reject(err);
               if (args.length >= 3) {
                 args[2].apply(null, [err]);
@@ -225,28 +230,28 @@ function instrumentPeerConnection(pc, id, config, constraints, trace, getStatsIn
   });
 
   pc.addEventListener('icecandidate', function(e) {
-    trace('onicecandidate', id, e.candidate);
+    trace('onicecandidate', e.candidate);
   });
   pc.addEventListener('addstream', function(e) {
-    trace('onaddstream', id, e.stream.id + ' ' + e.stream.getTracks().map(function(t) { return t.kind + ':' + t.id; }));
+    trace('onaddstream', e.stream.id + ' ' + e.stream.getTracks().map(function(t) { return t.kind + ':' + t.id; }));
   });
   pc.addEventListener('removestream', function(e) {
-    trace('onremovestream', id, e.stream.id + ' ' + e.stream.getTracks().map(function(t) { return t.kind + ':' + t.id; }));
+    trace('onremovestream', e.stream.id + ' ' + e.stream.getTracks().map(function(t) { return t.kind + ':' + t.id; }));
   });
   pc.addEventListener('signalingstatechange', function() {
-    trace('onsignalingstatechange', id, pc.signalingState);
+    trace('onsignalingstatechange', pc.signalingState);
   });
   pc.addEventListener('iceconnectionstatechange', function() {
-    trace('oniceconnectionstatechange', id, pc.iceConnectionState);
+    trace('oniceconnectionstatechange', pc.iceConnectionState);
   });
   pc.addEventListener('icegatheringstatechange', function() {
-    trace('onicegatheringstatechange', id, pc.iceGatheringState);
+    trace('onicegatheringstatechange', pc.iceGatheringState);
   });
   pc.addEventListener('negotiationneeded', function() {
-    trace('onnegotiationneeded', id);
+    trace('onnegotiationneeded');
   });
   pc.addEventListener('datachannel', function(event) {
-    trace('ondatachannel', id, [event.channel.id, event.channel.label]);
+    trace('ondatachannel', [event.channel.id, event.channel.label]);
   });
 
   // TODO: do we want one big interval and all peerconnections
@@ -263,14 +268,14 @@ function instrumentPeerConnection(pc, id, config, constraints, trace, getStatsIn
         pc.getStats(null, function(res) {
           var now = map2obj(res);
           var base = JSON.parse(JSON.stringify(now)); // our new prev
-          trace('getstats', id, deltaCompression(prev, now));
+          trace('getstats', deltaCompression(prev, now));
           prev = base;
         });
       } else {
         pc.getStats(function(res) {
           var now = mangleChromeStats(pc, res);
           var base = JSON.parse(JSON.stringify(now)); // our new prev
-          trace('getstats', id, deltaCompression(prev, now));
+          trace('getstats', deltaCompression(prev, now));
           prev = base;
         }, function(err) {
           console.log(err);
@@ -332,7 +337,14 @@ function instrumentGlobally(wsURL, getStatsInterval, prefixesToWrap) {
     var peerconnection = function(config, constraints) {
       var id = 'PC_' + peerconnectioncounter++;
       var pc = new origPeerConnection(config, constraints);
-      instrumentPeerConnection(pc, id, config, constraints, trace, getStatsInterval);
+      instrumentPeerConnection(pc, {
+        config: config,
+        constraints: constraints,
+        trace: function(eventName, details) {
+          trace(eventName, id, details);
+        },
+        getStatsInterval: getStatsInterval
+      });
       return pc;
     };
     // wrap static methods. Currently just generateCertificate.
