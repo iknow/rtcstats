@@ -1,5 +1,8 @@
 'use strict';
 
+var isFirefox = !!window.mozRTCPeerConnection;
+var isEdge = !!window.RTCIceGatherer;
+
 // transforms a maplike to an object. Mostly for getStats +
 // JSON.parse(JSON.stringify())
 function map2obj(m) {
@@ -108,7 +111,177 @@ function removeTimestamps(results) {
 }
 */
 
-module.exports = function(wsURL, getStatsInterval, prefixesToWrap) {
+function instrumentPeerConnection(pc, id, config, constraints, trace, getStatsInterval) {
+  if (!config) {
+    config = { nullConfig: true };
+  }
+
+  config = JSON.parse(JSON.stringify(config)); // deepcopy
+  // don't log credentials
+  ((config && config.iceServers) || []).forEach(function(server) {
+    delete server.credential;
+  });
+
+  if (isFirefox) {
+    config.browserType = 'moz';
+  } else if (isEdge) {
+    config.browserType = 'edge';
+  } else {
+    config.browserType = 'webkit';
+  }
+
+  trace('create', id, config);
+  // TODO: do we want to log constraints here? They are chrome-proprietary.
+  // http://stackoverflow.com/questions/31003928/what-do-each-of-these-experimental-goog-rtcpeerconnectionconstraints-do
+  if (constraints) {
+    trace('constraints', id, constraints);
+  }
+
+  ['createDataChannel', 'close'].forEach(function(method) {
+    if (pc[method]) {
+      var nativeMethod = pc[method];
+      pc[method] = function() {
+        trace(method, id, arguments);
+        return nativeMethod.apply(pc, arguments);
+      };
+    }
+  });
+
+  ['addStream', 'removeStream'].forEach(function(method) {
+    if (pc[method]) {
+      var nativeMethod = pc[method];
+      pc[method] = function(stream) {
+        var streamInfo = stream.getTracks().map(function(t) {
+          return t.kind + ':' + t.id;
+        });
+
+        trace(method, id, stream.id + ' ' + streamInfo);
+        return nativeMethod.call(pc, stream);
+      };
+    }
+  });
+
+  ['createOffer', 'createAnswer'].forEach(function(method) {
+    if (pc[method]) {
+      var nativeMethod = pc[method];
+      pc[method] = function() {
+        var args = arguments;
+        var opts;
+        if (arguments.length === 1 && typeof arguments[0] === 'object') {
+          opts = arguments[0];
+        } else if (arguments.length === 3 && typeof arguments[2] === 'object') {
+          opts = arguments[2];
+        }
+        trace(method, id, opts);
+        return new Promise(function(resolve, reject) {
+          nativeMethod.apply(pc, [
+            function(description) {
+              trace(method + 'OnSuccess', id, description);
+              resolve(description);
+              if (args.length > 0 && typeof args[0] === 'function') {
+                args[0].apply(null, [description]);
+              }
+            },
+            function(err) {
+              trace(method + 'OnFailure', id, err.toString());
+              reject(err);
+              if (args.length > 1 && typeof args[1] === 'function') {
+                args[1].apply(null, [err]);
+              }
+            },
+            opts,
+          ]);
+        });
+      };
+    }
+  });
+
+  ['setLocalDescription', 'setRemoteDescription', 'addIceCandidate'].forEach(function(method) {
+    if (pc[method]) {
+      var nativeMethod = pc[method];
+      pc[method] = function() {
+        var args = arguments;
+        trace(method, id, args[0]);
+        return new Promise(function(resolve, reject) {
+          nativeMethod.apply(pc, [args[0],
+            function() {
+              trace(method + 'OnSuccess', id);
+              resolve();
+              if (args.length >= 2) {
+                args[1].apply(null, []);
+              }
+            },
+            function(err) {
+              trace(method + 'OnFailure', id, err.toString());
+              reject(err);
+              if (args.length >= 3) {
+                args[2].apply(null, [err]);
+              }
+            }]
+          );
+        });
+      };
+    }
+  });
+
+  pc.addEventListener('icecandidate', function(e) {
+    trace('onicecandidate', id, e.candidate);
+  });
+  pc.addEventListener('addstream', function(e) {
+    trace('onaddstream', id, e.stream.id + ' ' + e.stream.getTracks().map(function(t) { return t.kind + ':' + t.id; }));
+  });
+  pc.addEventListener('removestream', function(e) {
+    trace('onremovestream', id, e.stream.id + ' ' + e.stream.getTracks().map(function(t) { return t.kind + ':' + t.id; }));
+  });
+  pc.addEventListener('signalingstatechange', function() {
+    trace('onsignalingstatechange', id, pc.signalingState);
+  });
+  pc.addEventListener('iceconnectionstatechange', function() {
+    trace('oniceconnectionstatechange', id, pc.iceConnectionState);
+  });
+  pc.addEventListener('icegatheringstatechange', function() {
+    trace('onicegatheringstatechange', id, pc.iceGatheringState);
+  });
+  pc.addEventListener('negotiationneeded', function() {
+    trace('onnegotiationneeded', id);
+  });
+  pc.addEventListener('datachannel', function(event) {
+    trace('ondatachannel', id, [event.channel.id, event.channel.label]);
+  });
+
+  // TODO: do we want one big interval and all peerconnections
+  //    queried in that or one setInterval per PC?
+  //    we have to collect results anyway so...
+  if (!isEdge) {
+    var prev = {};
+    var interval = window.setInterval(function() {
+      if (pc.signalingState === 'closed') {
+        window.clearInterval(interval);
+        return;
+      }
+      if (isFirefox) {
+        pc.getStats(null, function(res) {
+          var now = map2obj(res);
+          var base = JSON.parse(JSON.stringify(now)); // our new prev
+          trace('getstats', id, deltaCompression(prev, now));
+          prev = base;
+        });
+      } else {
+        pc.getStats(function(res) {
+          var now = mangleChromeStats(pc, res);
+          var base = JSON.parse(JSON.stringify(now)); // our new prev
+          trace('getstats', id, deltaCompression(prev, now));
+          prev = base;
+        }, function(err) {
+          console.log(err);
+        });
+      }
+    }, getStatsInterval);
+  }
+  return pc;
+}
+
+function instrumentGlobally(wsURL, getStatsInterval, prefixesToWrap) {
   var PROTOCOL_VERSION = '1.0';
   var buffer = [];
   var connection = new WebSocket(wsURL + window.location.pathname, PROTOCOL_VERSION);
@@ -147,8 +320,6 @@ module.exports = function(wsURL, getStatsInterval, prefixesToWrap) {
   }
 
   var peerconnectioncounter = 0;
-  var isFirefox = !!window.mozRTCPeerConnection;
-  var isEdge = !!window.RTCIceGatherer;
   prefixesToWrap.forEach(function(prefix) {
     if (!window[prefix + 'RTCPeerConnection']) {
       return;
@@ -161,173 +332,7 @@ module.exports = function(wsURL, getStatsInterval, prefixesToWrap) {
     var peerconnection = function(config, constraints) {
       var id = 'PC_' + peerconnectioncounter++;
       var pc = new origPeerConnection(config, constraints);
-
-      if (!config) {
-        config = { nullConfig: true };
-      }
-
-      config = JSON.parse(JSON.stringify(config)); // deepcopy
-      // don't log credentials
-      ((config && config.iceServers) || []).forEach(function(server) {
-        delete server.credential;
-      });
-
-      if (isFirefox) {
-        config.browserType = 'moz';
-      } else if (isEdge) {
-        config.browserType = 'edge';
-      } else {
-        config.browserType = 'webkit';
-      }
-
-      trace('create', id, config);
-      // TODO: do we want to log constraints here? They are chrome-proprietary.
-      // http://stackoverflow.com/questions/31003928/what-do-each-of-these-experimental-goog-rtcpeerconnectionconstraints-do
-      if (constraints) {
-        trace('constraints', id, constraints);
-      }
-
-      ['createDataChannel', 'close'].forEach(function(method) {
-        if (origPeerConnection.prototype[method]) {
-          var nativeMethod = pc[method];
-          pc[method] = function() {
-            trace(method, id, arguments);
-            return nativeMethod.apply(pc, arguments);
-          };
-        }
-      });
-
-      ['addStream', 'removeStream'].forEach(function(method) {
-        if (origPeerConnection.prototype[method]) {
-          var nativeMethod = pc[method];
-          pc[method] = function(stream) {
-            var streamInfo = stream.getTracks().map(function(t) {
-              return t.kind + ':' + t.id;
-            });
-
-            trace(method, id, stream.id + ' ' + streamInfo);
-            return nativeMethod.call(pc, stream);
-          };
-        }
-      });
-
-      ['createOffer', 'createAnswer'].forEach(function(method) {
-        if (origPeerConnection.prototype[method]) {
-          var nativeMethod = pc[method];
-          pc[method] = function() {
-            var args = arguments;
-            var opts;
-            if (arguments.length === 1 && typeof arguments[0] === 'object') {
-              opts = arguments[0];
-            } else if (arguments.length === 3 && typeof arguments[2] === 'object') {
-              opts = arguments[2];
-            }
-            trace(method, id, opts);
-            return new Promise(function(resolve, reject) {
-              nativeMethod.apply(pc, [
-                function(description) {
-                  trace(method + 'OnSuccess', id, description);
-                  resolve(description);
-                  if (args.length > 0 && typeof args[0] === 'function') {
-                    args[0].apply(null, [description]);
-                  }
-                },
-                function(err) {
-                  trace(method + 'OnFailure', id, err.toString());
-                  reject(err);
-                  if (args.length > 1 && typeof args[1] === 'function') {
-                    args[1].apply(null, [err]);
-                  }
-                },
-                opts,
-              ]);
-            });
-          };
-        }
-      });
-
-      ['setLocalDescription', 'setRemoteDescription', 'addIceCandidate'].forEach(function(method) {
-        if (origPeerConnection.prototype[method]) {
-          var nativeMethod = pc[method];
-          pc[method] = function() {
-            var args = arguments;
-            trace(method, id, args[0]);
-            return new Promise(function(resolve, reject) {
-              nativeMethod.apply(pc, [args[0],
-                function() {
-                  trace(method + 'OnSuccess', id);
-                  resolve();
-                  if (args.length >= 2) {
-                    args[1].apply(null, []);
-                  }
-                },
-                function(err) {
-                  trace(method + 'OnFailure', id, err.toString());
-                  reject(err);
-                  if (args.length >= 3) {
-                    args[2].apply(null, [err]);
-                  }
-                }]
-              );
-            });
-          };
-        }
-      });
-
-      pc.addEventListener('icecandidate', function(e) {
-        trace('onicecandidate', id, e.candidate);
-      });
-      pc.addEventListener('addstream', function(e) {
-        trace('onaddstream', id, e.stream.id + ' ' + e.stream.getTracks().map(function(t) { return t.kind + ':' + t.id; }));
-      });
-      pc.addEventListener('removestream', function(e) {
-        trace('onremovestream', id, e.stream.id + ' ' + e.stream.getTracks().map(function(t) { return t.kind + ':' + t.id; }));
-      });
-      pc.addEventListener('signalingstatechange', function() {
-        trace('onsignalingstatechange', id, pc.signalingState);
-      });
-      pc.addEventListener('iceconnectionstatechange', function() {
-        trace('oniceconnectionstatechange', id, pc.iceConnectionState);
-      });
-      pc.addEventListener('icegatheringstatechange', function() {
-        trace('onicegatheringstatechange', id, pc.iceGatheringState);
-      });
-      pc.addEventListener('negotiationneeded', function() {
-        trace('onnegotiationneeded', id);
-      });
-      pc.addEventListener('datachannel', function(event) {
-        trace('ondatachannel', id, [event.channel.id, event.channel.label]);
-      });
-
-      // TODO: do we want one big interval and all peerconnections
-      //    queried in that or one setInterval per PC?
-      //    we have to collect results anyway so...
-      if (!isEdge) {
-        var prev = {};
-        var interval = window.setInterval(function() {
-          if (pc.signalingState === 'closed') {
-            window.clearInterval(interval);
-            return;
-          }
-          if (isFirefox) {
-            pc.getStats(null, function(res) {
-              var now = map2obj(res);
-              var base = JSON.parse(JSON.stringify(now)); // our new prev
-              trace('getstats', id, deltaCompression(prev, now));
-              prev = base;
-            });
-          } else {
-            pc.getStats(function(res) {
-              var now = mangleChromeStats(pc, res);
-              var base = JSON.parse(JSON.stringify(now)); // our new prev
-              trace('getstats', id, deltaCompression(prev, now));
-              prev = base;
-            }, function(err) {
-              console.log(err);
-            });
-          }
-        }, getStatsInterval);
-      }
+      instrumentPeerConnection(pc, id, config, constraints, trace, getStatsInterval);
       return pc;
     };
     // wrap static methods. Currently just generateCertificate.
@@ -404,4 +409,7 @@ module.exports = function(wsURL, getStatsInterval, prefixesToWrap) {
   window.rtcstats = {
     trace: trace,
   };
-};
+}
+
+module.exports = instrumentGlobally;
+module.exports.instrumentPeerConnection = instrumentPeerConnection;
