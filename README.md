@@ -28,5 +28,22 @@ require('./rtcstats')(
 ```
 When using ontop of adapter it is typically not necessary (and potentially harmful to shim the webkit and moz prefixes in addition to the unprefixed version.
 
+### Lower level interface
+
+This allows the module to be used without altering the global environment.
+
+```
+import { instrumentPeerConnection } from './rtcstats';
+
+let pc = new RTCPeerConnection(configuration);
+instrumentPeerConnection(pc, {
+    configuration,
+    trace(eventName, details) {
+        console.log(`[${eventName}] ${details}`);
+    },
+    getStatsInterval: 1000,
+});
+```
+
 ## Importing the dumps
 The dumps generated can be imported and visualized using [this tool](https://fippo.github.io/webrtc-dump-importer/rtcstats)
