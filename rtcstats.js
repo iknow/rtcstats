@@ -40,50 +40,20 @@ function deltaCompression(oldStats, newStats) {
   return newStats;
 }
 
-function mangleChromeStats(pc, response) {
-  var standardReport = {};
-  var reports = response.result();
-  reports.forEach(function(report) {
-    var standardStats = {
-      id: report.id,
-      timestamp: report.timestamp.getTime(),
-      type: report.type,
-    };
-    report.names().forEach(function(name) {
-      standardStats[name] = report.stat(name);
-    });
-    // backfill mediaType -- until https://codereview.chromium.org/1307633007/ lands.
-    if (report.type === 'ssrc' && !standardStats.mediaType && standardStats.googTrackId) {
-      // look up track kind in local or remote streams.
-      var streams = pc.getRemoteStreams().concat(pc.getLocalStreams());
-      for (var i = 0; i < streams.length && !standardStats.mediaType; i++) {
-        var tracks = streams[i].getTracks();
-        for (var j = 0; j < tracks.length; j++) {
-          if (tracks[j].id === standardStats.googTrackId) {
-            standardStats.mediaType = tracks[j].kind;
-            report.mediaType = tracks[j].kind;
-          }
-        }
-      }
-    }
-    standardReport[standardStats.id] = standardStats;
-  });
-  return standardReport;
+function dumpTrack(track) {
+  return {
+    id: track.id,                 // unique identifier (GUID) for the track
+    kind: track.kind,             // `audio` or `video`
+    label: track.label,           // identified the track source
+    enabled: track.enabled,       // application can control it
+    muted: track.muted,           // application cannot control it (read-only)
+    readyState: track.readyState, // `live` or `ended`
+  };
 }
-
 function dumpStream(stream) {
   return {
     id: stream.id,
-    tracks: stream.getTracks().map(function(track) {
-      return {
-        id: track.id,                 // unique identifier (GUID) for the track
-        kind: track.kind,             // `audio` or `video`
-        label: track.label,           // identified the track source
-        enabled: track.enabled,       // application can control it
-        muted: track.muted,           // application cannot control it (read-only)
-        readyState: track.readyState, // `live` or `ended`
-      };
-    }),
+    tracks: stream.getTracks().map(dumpTrack),
   };
 }
 
@@ -110,6 +80,79 @@ function removeTimestamps(results) {
   return results;
 }
 */
+
+var inspectors = {
+  MediaStream: function(stream) {
+    var streamInfo = stream.getTracks().map(function(t) {
+      return t.kind + ':' + t.id;
+    });
+
+    return stream.id + ' ' + streamInfo;
+  },
+
+  RTCPeerConnectionIceEvent: function(e) {
+    return e.candidate;
+  },
+
+  RTCTrackEvent: function(e) {
+    return dumpTrack(e.track);
+  },
+
+  MediaStreamEvent: function(e) {
+    return dumpStream(e.stream);
+  },
+
+  Object: function(o) {
+    return o;
+  }
+};
+
+function inspect(x) {
+  if (x !== null && typeof x === 'object') {
+    var typeName = x.constructor.name;
+    var inspector = inspectors[typeName];
+    return inspector ? inspector(x) : x;
+  }
+  return x;
+}
+
+function traceMethod(trace, object, method) {
+  var native = object[method];
+  if (!native) return;
+  object[method] = function() {
+    var args = Array.prototype.slice.call(arguments).map(inspect);
+    if (args.length === 0) {
+      args = undefined;
+    } else if (args.length === 1) {
+      args = args[0];
+    }
+    trace(method, args);
+    var returnValue = native.apply(this, arguments);
+    if (returnValue !== null && typeof returnValue === 'object' && 'then' in returnValue) {
+      returnValue.then(
+        function (value) { trace(method + 'OnSuccess', inspect(value)); },
+        function (failure) { trace(method + 'OnFailure', inspect(failure)); }
+      );
+    }
+    return returnValue;
+  };
+}
+
+function traceEvent(trace, object, event, eventInspector) {
+  eventInspector = eventInspector || inspect;
+  var reportedEventName = 'on' + event;
+  object.addEventListener(event, function(e) {
+    trace(reportedEventName, eventInspector(e));
+  });
+}
+
+function traceStateChangeEvent(trace, object, stateKey) {
+  var changeEventName = stateKey.toLowerCase() + 'change';
+  var reportedEventName = 'on' + changeEventName;
+  object.addEventListener(changeEventName, function () {
+    trace(reportedEventName, object[stateKey]);
+  });
+}
 
 function instrumentPeerConnection(pc, options) {
   var config = options.config || { nullConfig: true };
@@ -142,116 +185,35 @@ function instrumentPeerConnection(pc, options) {
     trace('constraints', constraints);
   }
 
-  ['createDataChannel', 'close'].forEach(function(method) {
-    if (pc[method]) {
-      var nativeMethod = pc[method];
-      pc[method] = function() {
-        trace(method, arguments);
-        return nativeMethod.apply(pc, arguments);
-      };
-    }
+  [
+    'createDataChannel', 'close',
+    'addStream', 'removeStream',
+    'createOffer', 'createAnswer',
+    'setLocalDescription', 'setRemoteDescription',
+    'addIceCandidate'
+  ].forEach(function (method) {
+    traceMethod(trace, pc, method);
   });
 
-  ['addStream', 'removeStream'].forEach(function(method) {
-    if (pc[method]) {
-      var nativeMethod = pc[method];
-      pc[method] = function(stream) {
-        var streamInfo = stream.getTracks().map(function(t) {
-          return t.kind + ':' + t.id;
-        });
-
-        trace(method, stream.id + ' ' + streamInfo);
-        return nativeMethod.call(pc, stream);
-      };
-    }
+  [
+    'addstream', 'removestream',
+    'track',
+    'negotiationneeded',
+    'datachannel'
+  ].forEach(function (event) {
+    traceEvent(trace, pc, event);
   });
 
-  ['createOffer', 'createAnswer'].forEach(function(method) {
-    if (pc[method]) {
-      var nativeMethod = pc[method];
-      pc[method] = function() {
-        var args = arguments;
-        var opts;
-        if (arguments.length === 1 && typeof arguments[0] === 'object') {
-          opts = arguments[0];
-        } else if (arguments.length === 3 && typeof arguments[2] === 'object') {
-          opts = arguments[2];
-        }
-        trace(method, opts);
-        return new Promise(function(resolve, reject) {
-          nativeMethod.apply(pc, [
-            function(description) {
-              trace(method + 'OnSuccess', description);
-              resolve(description);
-              if (args.length > 0 && typeof args[0] === 'function') {
-                args[0].apply(null, [description]);
-              }
-            },
-            function(err) {
-              trace(method + 'OnFailure', err.toString());
-              reject(err);
-              if (args.length > 1 && typeof args[1] === 'function') {
-                args[1].apply(null, [err]);
-              }
-            },
-            opts,
-          ]);
-        });
-      };
-    }
-  });
+  // Safari's RTCPeerConnectionIceEvent doesn't seem to have an appropriate constructor
+  traceEvent(trace, pc, 'icecandidate', inspectors.RTCPeerConnectionIceEvent);
 
-  ['setLocalDescription', 'setRemoteDescription', 'addIceCandidate'].forEach(function(method) {
-    if (pc[method]) {
-      var nativeMethod = pc[method];
-      pc[method] = function() {
-        var args = arguments;
-        trace(method, args[0]);
-        return new Promise(function(resolve, reject) {
-          nativeMethod.apply(pc, [args[0],
-            function() {
-              trace(method + 'OnSuccess');
-              resolve();
-              if (args.length >= 2) {
-                args[1].apply(null, []);
-              }
-            },
-            function(err) {
-              trace(method + 'OnFailure', err.toString());
-              reject(err);
-              if (args.length >= 3) {
-                args[2].apply(null, [err]);
-              }
-            }]
-          );
-        });
-      };
-    }
-  });
-
-  pc.addEventListener('icecandidate', function(e) {
-    trace('onicecandidate', e.candidate);
-  });
-  pc.addEventListener('addstream', function(e) {
-    trace('onaddstream', e.stream.id + ' ' + e.stream.getTracks().map(function(t) { return t.kind + ':' + t.id; }));
-  });
-  pc.addEventListener('removestream', function(e) {
-    trace('onremovestream', e.stream.id + ' ' + e.stream.getTracks().map(function(t) { return t.kind + ':' + t.id; }));
-  });
-  pc.addEventListener('signalingstatechange', function() {
-    trace('onsignalingstatechange', pc.signalingState);
-  });
-  pc.addEventListener('iceconnectionstatechange', function() {
-    trace('oniceconnectionstatechange', pc.iceConnectionState);
-  });
-  pc.addEventListener('icegatheringstatechange', function() {
-    trace('onicegatheringstatechange', pc.iceGatheringState);
-  });
-  pc.addEventListener('negotiationneeded', function() {
-    trace('onnegotiationneeded');
-  });
-  pc.addEventListener('datachannel', function(event) {
-    trace('ondatachannel', [event.channel.id, event.channel.label]);
+  [
+    'connectionState',
+    'signalingState',
+    'iceConnectionState',
+    'iceGatheringState',
+  ].forEach(function (event) {
+    traceStateChangeEvent(trace, pc, event);
   });
 
   // TODO: do we want one big interval and all peerconnections
@@ -264,23 +226,13 @@ function instrumentPeerConnection(pc, options) {
         window.clearInterval(interval);
         return;
       }
-      if (isFirefox) {
-        pc.getStats(null, function(res) {
-          var now = map2obj(res);
-          var base = JSON.parse(JSON.stringify(now)); // our new prev
-          trace('getstats', deltaCompression(prev, now));
-          prev = base;
-        });
-      } else {
-        pc.getStats(function(res) {
-          var now = mangleChromeStats(pc, res);
-          var base = JSON.parse(JSON.stringify(now)); // our new prev
-          trace('getstats', deltaCompression(prev, now));
-          prev = base;
-        }, function(err) {
-          console.log(err);
-        });
-      }
+
+      pc.getStats().then(function (stats) {
+        var now = map2obj(stats);
+        var base = JSON.parse(JSON.stringify(now)); // our new prev
+        trace('getstats', deltaCompression(prev, now));
+        prev = base;
+      });
     }, getStatsInterval);
   }
   return pc;
