@@ -187,6 +187,7 @@ function instrumentPeerConnection(pc, options) {
 
   [
     'createDataChannel', 'close',
+    'addTrack', 'removeTrack',
     'addStream', 'removeStream',
     'createOffer', 'createAnswer',
     'setLocalDescription', 'setRemoteDescription',
