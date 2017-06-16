@@ -3,6 +3,12 @@
 var isFirefox = !!window.mozRTCPeerConnection;
 var isEdge = !!window.RTCIceGatherer;
 
+// Utils
+
+function deepCopy(x) {
+  return JSON.parse(JSON.stringify(x));
+}
+
 // transforms a maplike to an object. Mostly for getStats +
 // JSON.parse(JSON.stringify())
 function map2obj(m) {
@@ -16,10 +22,12 @@ function map2obj(m) {
   return o;
 }
 
+// Compression
+
 // apply a delta compression to the stats report. Reduces size by ~90%.
 // To reduce further, report keys could be compressed.
 function deltaCompression(oldStats, newStats) {
-  newStats = JSON.parse(JSON.stringify(newStats));
+  newStats = deepCopy(newStats);
   Object.keys(newStats).forEach(function(id) {
     if (!oldStats[id]) {
       return;
@@ -40,6 +48,8 @@ function deltaCompression(oldStats, newStats) {
   return newStats;
 }
 
+// Inspection
+
 function dumpTrack(track) {
   return {
     id: track.id,                 // unique identifier (GUID) for the track
@@ -57,38 +67,8 @@ function dumpStream(stream) {
   };
 }
 
-/*
-function filterBoringStats(results) {
-  Object.keys(results).forEach(function(id) {
-    switch (results[id].type) {
-      case 'certificate':
-      case 'codec':
-        delete results[id];
-        break;
-      default:
-        // noop
-    }
-  });
-  return results;
-}
-
-function removeTimestamps(results) {
-  // FIXME: does not work in FF since the timestamp can't be deleted.
-  Object.keys(results).forEach(function(id) {
-    delete results[id].timestamp;
-  });
-  return results;
-}
-*/
-
 var inspectors = {
-  MediaStream: function(stream) {
-    var streamInfo = stream.getTracks().map(function(t) {
-      return t.kind + ':' + t.id;
-    });
-
-    return stream.id + ' ' + streamInfo;
-  },
+  MediaStream: dumpStream,
 
   RTCPeerConnectionIceEvent: function(e) {
     return e.candidate;
@@ -116,9 +96,41 @@ function inspect(x) {
   return x;
 }
 
-function traceMethod(trace, object, method) {
+// Output
+
+function websocketTrace(url) {
+  var PROTOCOL_VERSION = '1.0';
+  var buffer = [];
+  var connection = new WebSocket(url + window.location.pathname, PROTOCOL_VERSION);
+  connection.onerror = function(e) {
+    console.log('WS ERROR', e);
+  };
+
+  connection.onopen = function() {
+    while (buffer.length) {
+      connection.send(JSON.stringify(buffer.shift()));
+    }
+  };
+
+  function trace() {
+    var args = Array.prototype.slice.call(arguments);
+    args.push(new Date().getTime());
+    if (connection.readyState === 1) {
+      connection.send(JSON.stringify(args));
+    } else {
+      buffer.push(args);
+    }
+  }
+
+  return trace;
+}
+
+// Method wrapping
+
+function traceMethod(trace, object, method, name) {
   var native = object[method];
   if (!native) return;
+  if (!name) name = method;
   object[method] = function() {
     var args = Array.prototype.slice.call(arguments).map(inspect);
     if (args.length === 0) {
@@ -126,12 +138,12 @@ function traceMethod(trace, object, method) {
     } else if (args.length === 1) {
       args = args[0];
     }
-    trace(method, args);
+    trace(name, args);
     var returnValue = native.apply(this, arguments);
     if (returnValue !== null && typeof returnValue === 'object' && 'then' in returnValue) {
       returnValue.then(
-        function (value) { trace(method + 'OnSuccess', inspect(value)); },
-        function (failure) { trace(method + 'OnFailure', inspect(failure)); }
+        function (value) { trace(name + 'OnSuccess', inspect(value)); },
+        function (failure) { trace(name + 'OnFailure', inspect(failure)); }
       );
     }
     return returnValue;
@@ -154,7 +166,7 @@ function traceStateChangeEvent(trace, object, stateKey) {
   });
 }
 
-function instrumentPeerConnection(pc, options) {
+function tracePeerConnection(pc, options) {
   var config = options.config || { nullConfig: true };
   var constraints = options.constraints;
   var trace = options.trace;
@@ -164,7 +176,7 @@ function instrumentPeerConnection(pc, options) {
     config = { nullConfig: true };
   }
 
-  config = JSON.parse(JSON.stringify(config)); // deepcopy
+  config = deepCopy(config); // deepcopy
   // don't log credentials
   ((config && config.iceServers) || []).forEach(function(server) {
     delete server.credential;
@@ -179,6 +191,7 @@ function instrumentPeerConnection(pc, options) {
   }
 
   trace('create', config);
+
   // TODO: do we want to log constraints here? They are chrome-proprietary.
   // http://stackoverflow.com/questions/31003928/what-do-each-of-these-experimental-goog-rtcpeerconnectionconstraints-do
   if (constraints) {
@@ -230,52 +243,16 @@ function instrumentPeerConnection(pc, options) {
 
       pc.getStats().then(function (stats) {
         var now = map2obj(stats);
-        var base = JSON.parse(JSON.stringify(now)); // our new prev
         trace('getstats', deltaCompression(prev, now));
-        prev = base;
+        prev = now;
       });
     }, getStatsInterval);
   }
   return pc;
 }
 
-function instrumentGlobally(wsURL, getStatsInterval, prefixesToWrap) {
-  var PROTOCOL_VERSION = '1.0';
-  var buffer = [];
-  var connection = new WebSocket(wsURL + window.location.pathname, PROTOCOL_VERSION);
-  connection.onerror = function(e) {
-    console.log('WS ERROR', e);
-  };
-
-  /*
-  connection.onclose = function() {
-    // reconnect?
-  };
-  */
-
-  connection.onopen = function() {
-    while (buffer.length) {
-      connection.send(JSON.stringify(buffer.shift()));
-    }
-  };
-
-  /*
-  connection.onmessage = function(msg) {
-    // no messages from the server defined yet.
-  };
-  */
-
-  function trace() {
-    //console.log.apply(console, arguments);
-    // TODO: drop getStats when not connected?
-    var args = Array.prototype.slice.call(arguments);
-    args.push(new Date().getTime());
-    if (connection.readyState === 1) {
-      connection.send(JSON.stringify(args));
-    } else {
-      buffer.push(args);
-    }
-  }
+function traceGlobally(wsURL, getStatsInterval, prefixesToWrap) {
+  var wstrace = websocketTrace(wsURL);
 
   var peerconnectioncounter = 0;
   prefixesToWrap.forEach(function(prefix) {
@@ -284,97 +261,52 @@ function instrumentGlobally(wsURL, getStatsInterval, prefixesToWrap) {
     }
     if (prefix === 'webkit' && isEdge) {
       // dont wrap webkitRTCPeerconnection in Edge.
+      // TODO: why?
       return;
     }
     var origPeerConnection = window[prefix + 'RTCPeerConnection'];
     var peerconnection = function(config, constraints) {
       var id = 'PC_' + peerconnectioncounter++;
       var pc = new origPeerConnection(config, constraints);
-      instrumentPeerConnection(pc, {
+      tracePeerConnection(pc, {
         config: config,
         constraints: constraints,
         trace: function(eventName, details) {
-          trace(eventName, id, details);
+          wstrace(eventName, id, details);
         },
         getStatsInterval: getStatsInterval
       });
-      return pc;
+      return pc; // Note overriding return value of constructor function as per ECMA 262 9.2.2
     };
-    // wrap static methods. Currently just generateCertificate.
-    if (origPeerConnection.generateCertificate) {
-      Object.defineProperty(peerconnection, 'generateCertificate', {
-        get: function() {
-          return arguments.length ?
-              origPeerConnection.generateCertificate.apply(null, arguments)
-              : origPeerConnection.generateCertificate;
-        },
-      });
-    }
+
+    // Copy static methods to replaced constructor
+    [
+      'generateCertificate',
+    ].forEach(function (method) {
+      if (origPeerConnection[method]) {
+        peerconnection[method] = origPeerConnection[method];
+      }
+    });
+
+    // This prototype isn't going to be used for method resolution, since the constructor returns an
+    // instance of the original type. However, it's still used by code that expects to be able to
+    // inspect and manipulate the prototype via `RTCPeerConnection.prototype` (like webrtc-adapter).
+    peerconnection.prototype = origPeerConnection.prototype;
+
     window[prefix + 'RTCPeerConnection'] = peerconnection;
-    window[prefix + 'RTCPeerConnection'].prototype = origPeerConnection.prototype;
   });
 
-  // getUserMedia wrappers
   prefixesToWrap.forEach(function(prefix) {
-    var name = prefix + (prefix.length ? 'GetUserMedia' : 'getUserMedia');
-    if (!navigator[name]) {
-      return;
-    }
-    var origGetUserMedia = navigator[name].bind(navigator);
-    var gum = function() {
-      trace('getUserMedia', null, arguments[0]);
-      var cb = arguments[1];
-      var eb = arguments[2];
-      origGetUserMedia(arguments[0],
-        function(stream) {
-          // we log the stream id, track ids and tracks readystate since that is ended GUM fails
-          // to acquire the cam (in chrome)
-          trace('getUserMediaOnSuccess', null, dumpStream(stream));
-          if (cb) {
-            cb(stream);
-          }
-        },
-        function(err) {
-          trace('getUserMediaOnFailure', null, err.name);
-          if (eb) {
-            eb(err);
-          }
-        }
-      );
-    };
-    navigator[name] = gum.bind(navigator);
+    traceMethod(wstrace, navigator,
+      prefix + (prefix.length ? 'GetUserMedia' : 'getUserMedia'));
   });
 
-  if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-    var origGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
-    var gum = function() {
-      trace('navigator.mediaDevices.getUserMedia', null, arguments[0]);
-      return origGetUserMedia.apply(navigator.mediaDevices, arguments)
-      .then(function(stream) {
-        trace('navigator.mediaDevices.getUserMediaOnSuccess', null, dumpStream(stream));
-        return stream;
-      }, function(err) {
-        trace('navigator.mediaDevices.getUserMediaOnFailure', null, err.name);
-        return Promise.reject(err);
-      });
-    };
-    navigator.mediaDevices.getUserMedia = gum.bind(navigator.mediaDevices);
-  }
+  traceMethod(wstrace, navigator.mediaDevices, 'getUserMedia',
+    'navigator.mediaDevices.getUserMedia');
 
-  // TODO: are there events defined on MST that would allow us to listen when enabled was set?
-  //    no :-(
-  /*
-  Object.defineProperty(MediaStreamTrack.prototype, 'enabled', {
-    set: function(value) {
-      trace('MediaStreamTrackEnable', this, value);
-    }
-  });
-  */
-
-  window.rtcstats = {
-    trace: trace,
-  };
+  // Export trace method into global namespace for interactive debugging
+  window.rtcstats = { trace: wstrace };
 }
 
-module.exports = instrumentGlobally;
-module.exports.instrumentPeerConnection = instrumentPeerConnection;
+module.exports = traceGlobally;
+module.exports.tracePeerConnection = tracePeerConnection;

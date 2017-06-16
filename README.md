@@ -33,10 +33,10 @@ When using ontop of adapter it is typically not necessary (and potentially harmf
 This allows the module to be used without altering the global environment.
 
 ```
-import { instrumentPeerConnection } from './rtcstats';
+import { tracePeerConnection } from './rtcstats';
 
 let pc = new RTCPeerConnection(configuration);
-instrumentPeerConnection(pc, {
+tracePeerConnection(pc, {
     configuration,
     trace(eventName, details) {
         console.log(`[${eventName}] ${details}`);
