@@ -25,7 +25,7 @@
   },
   "scripts": {
     "test": "./node_modules/.bin/eslint rtcstats.js nonmodule.js && npm run dist",
-    "dist": "mkdir -p out && browserify -o out/rtcstats.js nonmodule.js && uglifyjs -o min.js out/rtcstats.js",
+    "dist": "mkdir -p out && browserify -o out/rtcstats.js nonmodule.js && uglifyjs -m -o min.js out/rtcstats.js",
     "pre-adapter": "cp test/pre-adapter.html test/testpage.html && test/run-tests",
     "post-adapter": "cp test/post-adapter.html test/testpage.html && test/run-tests",
     "test-travis": "npm run pre-adapter && npm run post-adapter"
