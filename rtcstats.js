@@ -5,7 +5,7 @@ var isEdge = !!window.RTCIceGatherer;
 
 // Utils
 
-function deepCopy(x) {
+function deepCopyJSON(x) {
   return JSON.parse(JSON.stringify(x));
 }
 
@@ -27,7 +27,7 @@ function map2obj(m) {
 // apply a delta compression to the stats report. Reduces size by ~90%.
 // To reduce further, report keys could be compressed.
 function deltaCompression(oldStats, newStats) {
-  newStats = deepCopy(newStats);
+  newStats = deepCopyJSON(newStats);
   Object.keys(newStats).forEach(function(id) {
     if (!oldStats[id]) {
       return;
@@ -176,7 +176,7 @@ function tracePeerConnection(pc, options) {
     config = { nullConfig: true };
   }
 
-  config = deepCopy(config); // deepcopy
+  config = deepCopyJSON(config); // deepcopy
   // don't log credentials
   ((config && config.iceServers) || []).forEach(function(server) {
     delete server.credential;
