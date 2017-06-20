@@ -170,6 +170,28 @@ function traceStateChangeEvent(trace, object, stateKey) {
   });
 }
 
+// For regular browsers (firefox, chrome, safari, etc)
+function getStatsNoSelector(pc) {
+  return pc.getStats();
+}
+
+// For browsers that require selectors (ie, current edge (15),
+// despite microsoft's documentation saying otherwise)
+function getStatsWithTrackSelector(pc) {
+  function getStreamStats(stream) {
+    return stream.getTracks().map(function (track) {
+      return pc.getStats(track);
+    });
+  }
+
+  return Promise.all([].concat(
+    Array.prototype.concat.apply([], pc.getLocalStreams().map(getStreamStats)),
+    Array.prototype.concat.apply([], pc.getRemoteStreams().map(getStreamStats))
+  )).then(function(statsDicts) {
+    return Object.assign.apply(null, statsDicts.map(map2obj));
+  });
+}
+
 function tracePeerConnection(pc, options) {
   var config = options.config || { nullConfig: true };
   var constraints = options.constraints;
@@ -237,21 +259,23 @@ function tracePeerConnection(pc, options) {
   // TODO: do we want one big interval and all peerconnections
   //    queried in that or one setInterval per PC?
   //    we have to collect results anyway so...
-  if (!isEdge) {
-    var prev = {};
-    var interval = window.setInterval(function() {
-      if (pc.signalingState === 'closed') {
-        window.clearInterval(interval);
-        return;
-      }
 
-      pc.getStats().then(function (stats) {
-        var now = map2obj(stats);
-        trace('getstats', deltaCompression(prev, now));
-        prev = now;
-      });
-    }, getStatsInterval);
-  }
+  var getStats = isEdge ? getStatsWithTrackSelector : getStatsNoSelector;
+
+  var prev = {};
+  var interval = window.setInterval(function() {
+    if (pc.signalingState === 'closed') {
+      window.clearInterval(interval);
+      return;
+    }
+
+    getStats(pc).then(function (stats) {
+      var now = map2obj(stats);
+      trace('getstats', deltaCompression(prev, now));
+      prev = now;
+    });
+  }, getStatsInterval);
+
   return pc;
 }
 
