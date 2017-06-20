@@ -127,6 +127,10 @@ function websocketTrace(url) {
 
 // Method wrapping
 
+function isThenable(x) {
+  return x !== null && typeof x === 'object' && typeof x.then === 'function';
+}
+
 function traceMethod(trace, object, method, name) {
   var native = object[method];
   if (!native) return;
@@ -140,7 +144,7 @@ function traceMethod(trace, object, method, name) {
     }
     trace(name, args);
     var returnValue = native.apply(this, arguments);
-    if (returnValue !== null && typeof returnValue === 'object' && 'then' in returnValue) {
+    if (isThenable(returnValue)) {
       returnValue.then(
         function (value) { trace(name + 'OnSuccess', inspect(value)); },
         function (failure) { trace(name + 'OnFailure', inspect(failure)); }
