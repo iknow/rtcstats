@@ -1,5 +1,7 @@
 'use strict';
 
+var jsonpatch = require('fast-json-patch');
+
 var isFirefox = !!window.mozRTCPeerConnection;
 var isEdge = !!window.RTCIceGatherer;
 
@@ -22,30 +24,13 @@ function map2obj(m) {
   return o;
 }
 
-// Compression
-
-// apply a delta compression to the stats report. Reduces size by ~90%.
-// To reduce further, report keys could be compressed.
-function deltaCompression(oldStats, newStats) {
-  newStats = deepCopyJSON(newStats);
-  Object.keys(newStats).forEach(function(id) {
-    if (!oldStats[id]) {
-      return;
-    }
-    var report = newStats[id];
-    Object.keys(report).forEach(function(name) {
-      if (report[name] === oldStats[id][name]) {
-        delete newStats[id][name];
-      }
-      delete report.timestamp;
-      if (Object.keys(report).length === 0) {
-        delete newStats[id];
-      }
-    });
+function stripStatTimestamps(stats) {
+  stats = deepCopyJSON(stats);
+  Object.values(stats).forEach(function(report) {
+    delete report.timestamp;
   });
-  // TODO: moving the timestamp to the top-level is not compression but...
-  newStats.timestamp = new Date();
-  return newStats;
+
+  return stats;
 }
 
 // Inspection
@@ -262,17 +247,33 @@ function tracePeerConnection(pc, options) {
 
   var getStats = isEdge ? getStatsWithTrackSelector : getStatsNoSelector;
 
-  var prev = {};
+  var prev;
   var interval = window.setInterval(function() {
     if (pc.signalingState === 'closed') {
       window.clearInterval(interval);
       return;
     }
-
     getStats(pc).then(function (stats) {
-      var now = map2obj(stats);
-      trace('getstats', deltaCompression(prev, now));
-      prev = now;
+      var now = stripStatTimestamps(map2obj(stats));
+      var newDiffBase = deepCopyJSON(now);
+      var timestamp = new Date();
+
+      if (prev === undefined) {
+        now.timestamp = timestamp;
+        trace('getstats', now);
+      } else {
+        var patch = jsonpatch.compare(prev, now);
+
+        // Currently, json-fast-patch tries to replace individual characters in the timestamp
+        // string, leading to around 23 patch entries for what should be a single string replace.
+        // Instead, we add the patch manually
+        var timestampPatch = { op: 'replace', path: '/timestamp', value: timestamp };
+        patch.push(timestampPatch);
+
+        trace('statspatch', patch);
+      }
+
+      prev = newDiffBase;
     });
   }, getStatsInterval);
 
