@@ -255,12 +255,11 @@ function tracePeerConnection(pc, options) {
     }
     getStats(pc).then(function (stats) {
       var now = stripStatTimestamps(map2obj(stats));
-      var newDiffBase = deepCopyJSON(now);
 
       if (prev === undefined) trace('getstats', now);
       else trace('statspatch', jsonpatch.compare(prev, now));
 
-      prev = newDiffBase;
+      prev = now;
     });
   }, getStatsInterval);
 
