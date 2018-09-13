@@ -256,22 +256,9 @@ function tracePeerConnection(pc, options) {
     getStats(pc).then(function (stats) {
       var now = stripStatTimestamps(map2obj(stats));
       var newDiffBase = deepCopyJSON(now);
-      var timestamp = new Date();
 
-      if (prev === undefined) {
-        now.timestamp = timestamp;
-        trace('getstats', now);
-      } else {
-        var patch = jsonpatch.compare(prev, now);
-
-        // Currently, json-fast-patch tries to replace individual characters in the timestamp
-        // string, leading to around 23 patch entries for what should be a single string replace.
-        // Instead, we add the patch manually
-        var timestampPatch = { op: 'replace', path: '/timestamp', value: timestamp };
-        patch.push(timestampPatch);
-
-        trace('statspatch', patch);
-      }
+      if (prev === undefined) trace('getstats', now);
+      else trace('statspatch', jsonpatch.compare(prev, now));
 
       prev = newDiffBase;
     });
