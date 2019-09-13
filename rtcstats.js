@@ -173,6 +173,10 @@ function getStatsWithTrackSelector(pc) {
     Array.prototype.concat.apply([], pc.getLocalStreams().map(getStreamStats)),
     Array.prototype.concat.apply([], pc.getRemoteStreams().map(getStreamStats))
   )).then(function(statsDicts) {
+    if (statsDicts.length === 0) {
+      return {};
+    }
+
     return Object.assign.apply(null, statsDicts.map(map2obj));
   });
 }
