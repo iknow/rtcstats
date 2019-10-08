@@ -25,6 +25,7 @@ Obfuscator.prototype.obfuscateCandidate = function (candidate) {
   var cand = SDPUtils.parseCandidate(candidate);
   if (cand.type !== 'relay') {
     cand.ip = this.obfuscateIP(cand.ip);
+    cand.address = this.obfuscateIP(cand.address);
   }
   if (cand.relatedAddress) {
     cand.relatedAddress = this.obfuscateIP(cand.relatedAddress);
